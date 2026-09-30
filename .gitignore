@@ -45,3 +45,9 @@ AGENTS.md
 /Makefile
 /bin/
 /generated/
+
+# Local credentials, deployment env and helper output
+/examples/team_ops/*.env
+/examples/team_ops/*.log
+/examples/team_ops/__pycache__/
+*.bak

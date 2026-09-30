@@ -136,6 +136,33 @@ def _bad_agent(agent: str, ctx: SlashContext) -> str | None:
     return None
 
 
+def _resolve_agent(prefix: str, ctx: SlashContext) -> tuple[str | None, str | None]:
+    """Resolve `prefix` to a unique agent name. Used by `/send` and `/tmux`
+    so the operator can type `/s m foo` instead of `/s manager foo`.
+
+    Returns `(name, None)` on success, `(None, error_msg)` on failure.
+
+    Rules:
+      1. exact match → use it (covers the common case + lets you target
+         a short name even when another agent starts with it)
+      2. otherwise, look for agents whose name startswith `prefix`:
+         - exactly 1 match → use it
+         - 0 matches → unknown-agent error
+         - 2+ matches → ambiguous error listing the candidates
+    """
+    if not _AGENT_NAME_RE.fullmatch(prefix):
+        return None, f"⚠️ 非法 agent 名: `{prefix}`"
+    _, agent_set, _, _ = _live_agents()
+    if prefix in agent_set:
+        return prefix, None
+    matches = sorted(n for n in agent_set if n.startswith(prefix))
+    if len(matches) == 1:
+        return matches[0], None
+    if not matches:
+        return None, f"⚠️ 未知 agent: `{prefix}`（合法名: {sorted(agent_set)}）"
+    return None, f"⚠️ 前缀 `{prefix}` 歧义，匹配多个: {matches}"
+
+
 def _shell(ctx: SlashContext, argv: list[str], timeout: int = 30) -> str:
     """Run a shell command via ctx.run, return stdout (or stderr on failure)."""
     try:
@@ -562,13 +589,13 @@ def _handle_tmux(args: str, ctx: SlashContext) -> str | dict:
     Unknown-agent / illegal-name still return text (warning is
     one-line — a card here would be over-formatting)."""
     parts = args.split()
-    agent = parts[0] if parts else _default_agent(ctx)
+    agent_input = parts[0] if parts else _default_agent(ctx)
     raw_lines = (int(parts[1]) if len(parts) >= 2 and parts[1].isdigit()
                  else _tmux_default_lines())
     n_lines = max(1, min(raw_lines, _tmux_max_lines()))
-    _, agent_set, _, _ = _live_agents()
-    if agent not in agent_set:
-        return f"⚠️ 未知 agent: `{agent}`（合法名: {sorted(agent_set)}）"
+    agent, warn = _resolve_agent(agent_input, ctx)
+    if warn:
+        return warn
     target = tmux.Target(ctx.session, agent)
     raw = tmux.capture_pane(target, lines=n_lines).rstrip() or "(窗口为空)"
     return simple_card(
@@ -584,13 +611,15 @@ def _handle_send(args: str, ctx: SlashContext) -> str:
     parts = args.split(None, 1)
     if len(parts) < 2 or not parts[1].strip():
         return "用法: /send <agent> <message>（缺少消息内容）"
-    agent, msg = parts[0].strip(), parts[1].strip()
-    if (warn := _bad_agent(agent, ctx)):
+    agent_input, msg = parts[0].strip(), parts[1].strip()
+    agent, warn = _resolve_agent(agent_input, ctx)
+    if warn:
         return warn
     target = tmux.Target(ctx.session, agent)
     ok = tmux.inject(target, msg)
     glyph = "✅" if ok else "❌"
-    return f"{glyph} /send → {ctx.session}:{agent}\n内容: {msg}"
+    suffix = f" (前缀解析自 `{agent_input}`)" if agent != agent_input else ""
+    return f"{glyph} /send → {ctx.session}:{agent}{suffix}\n内容: {msg}"
 
 
 _COMPACT_REJECT_MARKER = "can't be triggered from inside a response"
@@ -752,6 +781,8 @@ _HANDLERS: dict[str, Callable[[str, SlashContext], str]] = {
     "/usage": _handle_usage,
     "/tmux": _handle_tmux,
     "/send": _handle_send,
+    "/t":    _handle_tmux,   # alias: /t == /tmux (typing shortcut)
+    "/s":    _handle_send,   # alias: /s == /send (typing shortcut)
     "/compact": _handle_compact,
     "/stop": _handle_stop,
     "/clear": _handle_clear,

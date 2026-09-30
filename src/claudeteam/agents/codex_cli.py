@@ -50,7 +50,14 @@ class CodexCliAdapter(CliAdapter):
         if model and any(model.startswith(p) for p in _OPENAI_PREFIXES):
             args += ["--model", model]
         quoted = " ".join(shlex.quote(a) for a in args)
-        return (f"CODEX_HOME={shlex.quote(codex_home(agent))} "
+        # Clear OPENAI_API_KEY / OPENAI_ADMIN_KEY at spawn time so codex
+        # falls back to ~/.codex/auth.json's auth_mode (chatgpt OAuth via
+        # ChatGPT-Plus). Without this, the operator's shell-level
+        # OPENAI_API_KEY (set in ~/.env.sh for unrelated tooling) overrides
+        # auth.json and forces codex into apikey mode → OpenAI quota
+        # exceeded, even though the subscription path was the intended one.
+        return (f"OPENAI_API_KEY= OPENAI_ADMIN_KEY= "
+                f"CODEX_HOME={shlex.quote(codex_home(agent))} "
                 f"CODEX_AGENT={shlex.quote(agent)} codex {quoted}")
 
     def display_model(self, model: str) -> str:

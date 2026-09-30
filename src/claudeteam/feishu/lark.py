@@ -3,8 +3,9 @@
 Single function: `call(args, *, profile, timeout) -> dict | None`.
 
 Returns the `data` field of lark-cli's JSON response on success, `{}` if
-stdout is empty, `None` on any failure.  Proxy bypass is automatic when
-`LARK_CLI_NO_PROXY=1` is set in the environment.
+stdout is empty, `None` on any failure.  Proxy bypass is controlled by
+`feishu.no_proxy` in claudeteam.toml (the legacy LARK_CLI_NO_PROXY env
+var is ignored).
 
 Round-86 perf note: an earlier draft of this docstring claimed
 "lark-cli routinely takes ~73 seconds per call". That was npx's
@@ -42,7 +43,7 @@ _PROXY_KEYS = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")
 # without an entrypoint script.
 _TENANT_TOKEN_URL = (
     "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal")
-_TENANT_TOKEN_CACHE = "/tmp/claudeteam_tenant_token.json"
+_TENANT_TOKEN_CACHE = "/tmp/claudeteam_tenant_token_{app_id}.json"
 _TENANT_TOKEN_REFRESH_BUFFER_S = 60   # refetch when within 60s of expiry
 
 
@@ -99,7 +100,14 @@ def _ensure_tenant_token(*, fetch: Callable | None = None,
     # args bind at function-definition time and would freeze the
     # original /tmp path before any patch could land.
     if cache_path is None:
-        cache_path = _TENANT_TOKEN_CACHE
+        # Per-app cache: previous flat /tmp/claudeteam_tenant_token.json
+        # collided between two teams sharing the same host but different
+        # bots (team1 cached its token; team2 read it and posted with
+        # wrong bot identity → "Bot/User can NOT be out of the chat").
+        # Namespace by app_id so each bot owns its slot.
+        _app_id = (env_str("FEISHU_APP_ID")
+                   or env_str("LARKSUITE_CLI_APP_ID") or "default")
+        cache_path = _TENANT_TOKEN_CACHE.format(app_id=_app_id)
     existing = env_str("LARKSUITE_CLI_TENANT_ACCESS_TOKEN")
     if existing:
         return existing
@@ -128,39 +136,74 @@ def _ensure_tenant_token(*, fetch: Callable | None = None,
     return str(fresh["token"])
 
 
+_COMBINED_CA_BUNDLE = "/tmp/claudeteam_combined_ca.pem"
+_SYSTEM_CA = "/etc/ssl/certs/ca-certificates.crt"
+_MITMPROXY_CA = os.path.expanduser("~/.mitmproxy/mitmproxy-ca-cert.pem")
+
+
+def _ensure_combined_ca_bundle() -> str | None:
+    """Create a combined CA bundle (system CAs + mitmproxy CA) so Go's
+    TLS verifier trusts the proxy.  Returns the path, or None if the
+    mitmproxy CA doesn't exist.  The bundle is cached at a fixed path
+    and only regenerated when missing.
+    """
+    if not os.path.isfile(_MITMPROXY_CA):
+        return None
+    if os.path.isfile(_COMBINED_CA_BUNDLE):
+        return _COMBINED_CA_BUNDLE
+    system = _SYSTEM_CA
+    if not os.path.isfile(system):
+        return None
+    try:
+        with open(system, "r") as sf, open(_MITMPROXY_CA, "r") as mf:
+            combined = sf.read() + "\n" + mf.read()
+        with open(_COMBINED_CA_BUNDLE, "w") as out:
+            out.write(combined)
+        return _COMBINED_CA_BUNDLE
+    except OSError:
+        return None
+
+
 def subprocess_env() -> dict[str, str]:
     """Build the env to hand to any lark-cli subprocess (one-shot `call` or
-    long-running `event +subscribe`). Strips HTTP/HTTPS proxy vars when
-    LARK_CLI_NO_PROXY is truthy, since lark-cli doesn't honor that variable
-    itself — it's a wrapper-side flag.
+    long-running `event +subscribe`).
+
+    Proxy control: `feishu.no_proxy` in claudeteam.toml is authoritative.
+    When true, HTTP/HTTPS proxy vars are stripped.  When false (proxy
+    enabled), SSL_CERT_FILE is auto-set to a combined CA bundle
+    (system + mitmproxy) so Go's TLS verifier trusts the MITM proxy.
+    The legacy LARK_CLI_NO_PROXY env var is always removed from the
+    subprocess env — lark-cli's Go binary treats any non-empty value as
+    "bypass proxy", so it must never leak through.
 
     Also injects `LARKSUITE_CLI_TENANT_ACCESS_TOKEN` when env vars
-    supply app_id+app_secret but lark-cli has no keychain access
-    (the Linux container case). No-op on macOS host where the token
-    is empty and lark-cli's keychain path takes over.
+    supply app_id+app_secret but lark-cli has no keychain access.
 
     Pins HOME to the host user's pw_dir so lark-cli finds
-    `~/.lark-cli/config.json` regardless of caller HOME. Claude panes
-    spawn with HOME=<state_dir>/agent-home/<agent> for ~/.claude.json
-    isolation; without this pin, `claudeteam say` from inside an agent
-    pane inherited the per-agent HOME and lark-cli failed to locate
-    its profile/keychain entry (rc=2). Use pw_dir, not the env's HOME,
-    so the override is robust against env tampering by the caller.
+    `~/.lark-cli/config.json` regardless of caller HOME.
     """
     env = os.environ.copy()
-    # `feishu.no_proxy` cascade: legacy env LARK_CLI_NO_PROXY first
-    # (predates tunables), then tunable lookup. Truthy => strip proxies.
-    legacy = env_str("LARK_CLI_NO_PROXY").lower()
-    if legacy in {"1", "true", "yes", "on"}:
-        no_proxy = True
-    elif legacy in {"0", "false", "no", "off"}:
-        no_proxy = False
-    else:
-        from claudeteam.runtime import tunables
-        no_proxy = bool(tunables.tunable("feishu.no_proxy", False))
+    # `feishu.no_proxy` — toml is authoritative.  The legacy
+    # LARK_CLI_NO_PROXY env var is ignored: it gets propagated into
+    # every spawned pane by lifecycle._PROPAGATED_ENV and permanently
+    # overrode the toml setting, making it impossible to enable proxy
+    # fleet-wide via config alone.
+    from claudeteam.runtime import tunables
+    no_proxy = bool(tunables.tunable("feishu.no_proxy", False))
     if no_proxy:
         for key in _PROXY_KEYS:
             env.pop(key, None)
+    else:
+        # Proxy enabled — ensure Go's TLS stack trusts the mitmproxy CA
+        # (if present) by pointing SSL_CERT_FILE at a combined bundle.
+        if "SSL_CERT_FILE" not in env:
+            combined = _ensure_combined_ca_bundle()
+            if combined:
+                env["SSL_CERT_FILE"] = combined
+    # Always remove LARK_CLI_NO_PROXY from the subprocess env: it's a
+    # wrapper-side flag.  lark-cli's Go binary treats ANY non-empty
+    # value (including "0"/"false") as "bypass proxy".
+    env.pop("LARK_CLI_NO_PROXY", None)
     env["HOME"] = pwd.getpwuid(os.getuid()).pw_dir
     token = _ensure_tenant_token()
     if token:

@@ -360,13 +360,13 @@ def test_team_card_color_yellow_when_any_agent_unhealthy():
     # one agent showing 🛑 (CLI not running)
     pane_buffers = {
         "manager": "...\n⏵⏵ bypass permissions on\n",
-        "worker_cc": "$ ",  # bash prompt → 🛑 CLI not running
+        "worker_cc": _BASH_PROMPT,  # bash prompt → 🛑 CLI not running
     }
 
     def fake_capture(target, lines=80):
         return pane_buffers.get(target.window, "")
 
-    with tmux_patch(capture_pane=fake_capture):
+    with _team_env(), tmux_patch(capture_pane=fake_capture):
         reply = slash.dispatch("/team",
                                _ctx(agents=("manager", "worker_cc")))
     assert reply["header"]["template"] == "yellow"
@@ -683,7 +683,7 @@ def test_tmux_default_agent_is_first_in_team():
         captured["target"] = str(target)
         return ""
 
-    with tmux_patch(capture_pane=fake_capture):
+    with _team_env(), tmux_patch(capture_pane=fake_capture):
         slash.dispatch("/tmux", _ctx(agents=("manager", "worker_cc")))
     assert captured["target"] == "ClaudeTeam:manager"
 
@@ -695,7 +695,7 @@ def test_tmux_clamps_lines_to_max():
         captured["lines"] = lines
         return ""
 
-    with tmux_patch(capture_pane=fake_capture):
+    with _team_env(), tmux_patch(capture_pane=fake_capture):
         slash.dispatch("/tmux manager 99999", _ctx())
     assert captured["lines"] == 2000  # _MAX_TMUX_LINES
 
@@ -892,7 +892,7 @@ def test_handler_exception_is_caught():
     # outer dispatch error path instead, since it doesn't catch internally.
     # …actually /tmux's tmux.capture_pane call is unguarded; dispatch
     # outer catch should land it.
-    with tmux_patch(capture_pane=boom_capture):
+    with _team_env(), tmux_patch(capture_pane=boom_capture):
         reply = slash.dispatch("/tmux manager", _ctx())
     assert "slash handler error" in reply or "kaboom" in reply
 

@@ -1,3 +1,10 @@
+> **Gwihwan-Go operations fork** — based on upstream `1ea5e45`, with the
+> local deployment fixes used through September 2026. Start with
+> [本 fork 的用法与改动](docs/LOCAL_OPERATIONS.md) for authentication,
+> multi-team configuration and session recovery. Recovery helper snapshots
+> live in [examples/team_ops](examples/team_ops/); upstream documentation
+> below describes the base project.
+
 <p align="center">
   <b>English</b> · <a href="docs/README_zh.md">简体中文</a>
 </p>
@@ -9,7 +16,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+" />
-  <img src="https://img.shields.io/badge/tests-878%20passing-brightgreen.svg" alt="878 tests passing" />
+  <img src="https://img.shields.io/badge/tests-1031%20passing-brightgreen.svg" alt="1031 tests passing" />
   <a href="docs/DEPLOYMENT.md"><img src="https://img.shields.io/badge/docs-deployment-success.svg" alt="Documentation" /></a>
   <img src="https://img.shields.io/badge/chat-Feishu-1a73e8.svg" alt="Chat: Feishu" />
 </p>
@@ -26,8 +33,8 @@
 > (Claude Code, Codex, Kimi, Gemini, Qwen, …):**
 >
 > ```
-> Clone https://github.com/zylMozart/ClaudeTeam.git, read
-> docs/DEPLOYMENT.md, then walk me through bringing up a team
+> Clone https://github.com/Gwihwan-Go/ClaudeTeam.git, read
+> docs/LOCAL_OPERATIONS.md and docs/DEPLOYMENT.md, then walk me through bringing up a team
 > end-to-end (including the Feishu app if I don't have one yet).
 > ```
 

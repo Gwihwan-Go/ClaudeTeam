@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import subprocess
+import contextlib
 
 from helpers import CallRecorder, FakeProc, env_patch
 from claudeteam.feishu import lark
@@ -13,9 +14,15 @@ def _Recorder(result=None) -> CallRecorder:
     return CallRecorder(result if result is not None else FakeProc())
 
 
+@contextlib.contextmanager
 def _no_proxy_env():
-    """Stage the env so lark-cli will strip HTTPS_PROXY before invoking npx."""
-    return env_patch(LARK_CLI_NO_PROXY="1", HTTPS_PROXY="http://proxy.example:7890")
+    """Proxy policy comes from TOML; legacy env flags must not escape."""
+    from helpers import isolated_env
+    with isolated_env() as tmp, env_patch(
+            LARK_CLI_NO_PROXY="0", HTTPS_PROXY="http://proxy.example:7890",
+            HTTP_PROXY="http://proxy.example:7890"):
+        (tmp / "claudeteam.toml").write_text("[feishu]\nno_proxy = true\n")
+        yield
 
 
 def test_run_builds_lark_cli_argv_with_profile():
@@ -282,7 +289,7 @@ def test_run_strips_https_proxy_when_no_proxy_env_set():
         lark.call(["x"], run=rec)
     env = rec.calls[0]["kwargs"]["env"]
     assert "HTTPS_PROXY" not in env
-    assert env.get("LARK_CLI_NO_PROXY") == "1"
+    assert "LARK_CLI_NO_PROXY" not in env
 
 
 def test_run_keeps_proxy_env_when_no_proxy_unset():
@@ -307,13 +314,11 @@ def test_subprocess_env_strips_proxy_when_no_proxy_set():
     inherits HTTPS_PROXY untouched and lark-cli +subscribe then fails
     to deliver events. router now calls lark.subprocess_env() to get
     the same proxy-stripped env that lark.call uses."""
-    with env_patch(LARK_CLI_NO_PROXY="1",
-                   HTTPS_PROXY="http://proxy.example:7890",
-                   HTTP_PROXY="http://proxy.example:7890"):
+    with _no_proxy_env():
         env = lark.subprocess_env()
     assert "HTTPS_PROXY" not in env
     assert "HTTP_PROXY" not in env
-    assert env.get("LARK_CLI_NO_PROXY") == "1"
+    assert "LARK_CLI_NO_PROXY" not in env
 
 
 def test_subprocess_env_keeps_proxy_when_no_proxy_unset():

@@ -53,11 +53,26 @@ _PROPAGATED_ENV = (
     "CLAUDETEAM_LARK_SEND_AS",
     "CLAUDETEAM_TEAM_FILE",
     "CLAUDETEAM_RUNTIME_CONFIG",
+    # CLAUDETEAM_CONFIG_FILE pins the unified TOML per pane. Without it,
+    # paths.config_file() falls back to `<cwd>/claudeteam.toml` — a pane
+    # whose shell happened to sit in another team's workdir (2026-07-14:
+    # ClaudeTeam2:CC1 spawned from ~/Symcli) resolves the WRONG team's
+    # chat_id/profile and posts to the other team's Feishu chat.
+    "CLAUDETEAM_CONFIG_FILE",
     "CLAUDETEAM_DEFAULT_MODEL",
     "FEISHU_APP_ID",
     "FEISHU_APP_SECRET",
     "LARKSUITE_CLI_APP_ID",
     "LARKSUITE_CLI_APP_SECRET",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_TLS_REJECT_UNAUTHORIZED",
+    "http_proxy",
+    "https_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "no_proxy",
 )
 
 
@@ -188,15 +203,16 @@ def _ensure_claude_agent_home(agent: str) -> None:
             # `security` missing / keychain locked / subprocess timeout →
             # silent skip and fall through to the host-file branch below.
             pass
-    if not keychain_extracted and not cred_link.exists():
-        user_creds = Path.home() / ".claude" / ".credentials.json"
-        if user_creds.exists():
-            try:
-                # Copy, not symlink: claude's atomic-write replaces the
-                # symlink with a plain file anyway, so start with one.
-                cred_link.write_bytes(user_creds.read_bytes())
-            except OSError:
-                pass
+    # Host-file cred copy RETIRED 2026-07-13. Deployment policy: claude
+    # panes authenticate ONLY via the long-lived CLAUDE_CODE_OAUTH_TOKEN
+    # env var (threaded through _PROPAGATED_ENV into every spawn_cmd).
+    # Copying the operator's ~/.claude/.credentials.json here gave every
+    # pane an 8h-TTL file that claude prefers over the env token; when it
+    # expired, the whole fleet demanded /login (2026-07-09 incident). The
+    # host file belongs to the operator's interactive sessions only.
+    # (keychain_extracted branch above is macOS-only and unused on this
+    # Linux deploy; left intact for upstream compatibility.)
+    _ = keychain_extracted  # noqa: F841
     settings = claude_dir / "settings.json"
     if not settings.exists():
         settings.write_text(

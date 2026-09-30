@@ -75,21 +75,11 @@ class ClaudeCodeAdapter(CliAdapter):
         #   "JSON Parse error" on restart. Lifecycle materialises the
         #   per-agent .claude/ from the live keychain (regular file, not
         #   symlink — claude's atomic-write replaces a symlink anyway).
-        # - CLAUDE_CODE_OAUTH_TOKEN: hand claude the access token directly
-        #   so it never asks the OS keychain. With per-agent HOME, claude's
-        #   keychain *write* path on token refresh would otherwise pop the
-        #   macOS "Keychain Not Found — Reset To Defaults" dialog (the
-        #   storage keychain selection fails because the agent's HOME is
-        #   off the user's login session). Pulling the token from
-        #   ~/.claude/.credentials.json (lifecycle just refreshed it from
-        #   keychain) and threading it through env keeps claude in
-        #   file-only auth mode for the lifetime of the pane.
-        oauth_token = _read_oauth_token(agent)
-        token_prefix = (f"CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(oauth_token)} "
-                        if oauth_token else "")
+        # The deployment supplies CLAUDE_CODE_OAUTH_TOKEN through
+        # lifecycle.pane_env_prefix(). Do not replace it with a short-lived
+        # access token from the operator's interactive credential file.
         return (
             f"HOME={agent_home(agent)} "
-            f"{token_prefix}"
             f"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 DISABLE_AUTOUPDATER=1 "
             f"IS_SANDBOX=1 claude --dangerously-skip-permissions "
             f"--model {model} --name {agent}"

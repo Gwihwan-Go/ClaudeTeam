@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import shutil
+import contextlib
 
 from helpers import attr_patch, env_patch, isolated_env, run_cli, tmux_patch
 
 
+@contextlib.contextmanager
 def _stub_tmux(*, session_alive: bool, panes_with_cli: list[str] = (),
                panes_without_cli: list[str] = ()):
     """Replace tmux.has_session/has_window/capture_pane for health probing."""
@@ -16,11 +18,12 @@ def _stub_tmux(*, session_alive: bool, panes_with_cli: list[str] = (),
             return "bypass permissions on\n? for shortcuts\n>"
         return "$ "
 
-    return tmux_patch(
+    with tmux_patch(
         has_session=lambda s: session_alive,
         has_window=lambda target: target.window in all_panes,
         capture_pane=capture_pane,
-    )
+    ), attr_patch(shutil, which=lambda name: f"/usr/bin/{name}"):
+        yield
 
 
 # ── happy path ──────────────────────────────────────────────────

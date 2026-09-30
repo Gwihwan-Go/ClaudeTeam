@@ -207,8 +207,13 @@ def test_collect_server_load_returns_full_data_shape():
     even when most subprocess calls fail (the common Docker Desktop
     macOS host case where uptime/free aren't visible)."""
     run = _stub_run({})
-    data = server_metrics.collect_server_load(
-        agent_set=frozenset(["manager"]), session="ContainerA", run=run)
+    from helpers import attr_patch
+    cpu, mem = server_metrics._host_cpu, server_metrics._host_mem
+    with attr_patch(server_metrics,
+                    _host_cpu=lambda **kw: cpu(**kw, read_proc=lambda _: None),
+                    _host_mem=lambda **kw: mem(**kw, read_proc=lambda _: None)):
+        data = server_metrics.collect_server_load(
+            agent_set=frozenset(["manager"]), session="ContainerA", run=run)
     assert set(data.keys()) == {"host", "containers", "agents", "alarms"}
     assert set(data["host"].keys()) == {"cpu", "mem", "disk"}
     # All None when run returns rc=1

@@ -126,7 +126,23 @@ def main(argv: list[str]) -> int:
             watchdog.supervise(specs, states, alert_fn=alert_fn)
             now = time.time()
             if now - last_cred_check >= cred_check_interval_s:
-                _maybe_refresh_claude_oauth(now)
+                # Claude cred-propagate RETIRED 2026-07-09. All claude
+                # panes auth via the long-lived CLAUDE_CODE_OAUTH_TOKEN
+                # env var (threaded through lifecycle._PROPAGATED_ENV);
+                # agent-homes carry no .credentials.json. Propagating the
+                # host file re-introduced file-based auth with a rotating
+                # refresh_token race: one pane refreshes+rotates, the next
+                # propagate stomps every OTHER pane's rotated token with
+                # the host's now-stale bytes → fleet-wide 401. The host
+                # file also belongs to the operator's own interactive
+                # claude sessions — it must never be treated as a
+                # ClaudeTeam-owned artifact.
+                #   _maybe_refresh_claude_oauth(now)   # retired with it
+                #   _propagate_host_creds_if_newer()
+                # codex is different: no env-var auth path exists, panes
+                # MUST use auth.json files, so fleet-sync (newest wins)
+                # remains the least-bad option for its rotating token.
+                _sync_codex_creds_across_fleet()
                 last_cred_check = now
             time.sleep(check_interval_s)
     except KeyboardInterrupt:
@@ -178,3 +194,150 @@ def _maybe_refresh_claude_oauth(now: float) -> None:
         print(f"  ⚠️ cred-refresh: claude rc={r.returncode}: {snippet}")
         return
     print("  ✅ claude token refreshed")
+    _propagate_host_creds_to_agents()
+
+
+def _propagate_host_creds_if_newer() -> None:
+    """Sync host ~/.claude/.credentials.json to agent-home snapshots
+    when the host file is newer (mtime-based). Quieter than the always-
+    log variant — only prints when a copy actually happens, so the
+    watchdog log doesn't bloat with no-op cycles."""
+    try:
+        host_mtime = _CRED_PATH.stat().st_mtime
+    except OSError:
+        return
+    agent_root = paths.state_dir() / "agent-home"
+    if not agent_root.is_dir():
+        return
+    stale = []
+    for agent_dir in agent_root.iterdir():
+        if not agent_dir.is_dir():
+            continue
+        target = agent_dir / ".claude" / ".credentials.json"
+        try:
+            if not target.exists() or target.stat().st_mtime < host_mtime - 1:
+                stale.append(target)
+        except OSError:
+            continue
+    if not stale:
+        return
+    _propagate_host_creds_to_agents()
+
+
+def _propagate_host_creds_to_agents() -> None:
+    """Copy the host ~/.claude/.credentials.json to every per-agent
+    HOME under <state_dir>/agent-home/<agent>/.claude/. Without this,
+    panes use their stale snapshot taken at provision time and hit
+    401 after ~6h. Best-effort; logs each per-agent failure but does
+    not raise."""
+    try:
+        host_bytes = _CRED_PATH.read_bytes()
+    except OSError as e:
+        print(f"  ⚠️ cred-propagate: read host creds failed: {e}")
+        return
+    agent_root = paths.state_dir() / "agent-home"
+    if not agent_root.is_dir():
+        return
+    copied = 0
+    for agent_dir in agent_root.iterdir():
+        if not agent_dir.is_dir():
+            continue
+        target = agent_dir / ".claude" / ".credentials.json"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(host_bytes)
+            copied += 1
+        except OSError as e:
+            print(f"  ⚠️ cred-propagate: {agent_dir.name} failed: {e}")
+    if copied:
+        print(f"  ✅ propagated fresh creds to {copied} agent-home(s)")
+
+
+_CODEX_AUTH_REL = Path(".codex/auth.json")
+
+
+def _sync_codex_creds_across_fleet() -> None:
+    """Sync codex ChatGPT-OAuth auth.json across all codex agent-homes AND
+    the operator's host `~/.codex/auth.json`.
+
+    Unlike claude which has a stable long-lived token stored in a file,
+    codex's ChatGPT OAuth uses a **rotating refresh_token**: every refresh
+    invalidates the previous refresh_token and writes a new one back to
+    the caller's auth.json. When N codex panes each spawned with an
+    identical auth.json byte-copy race to refresh, the first wins and
+    rotates; the remaining N-1 die with "refresh token was already used"
+    the next time they try to refresh.
+
+    Strategy: at each cycle, scan every candidate (host + per-agent) for
+    the newest `last_refresh` timestamp, then rewrite the older peers to
+    match it. Operator only ever needs to `codex login` in ONE place
+    (host OR any codex pane); within ≤ cred_check_interval_s the whole
+    fleet inherits the fresh refresh_token.
+
+    Best-effort: silently swallows read/parse/write errors so a single
+    bad JSON file doesn't kill the whole cycle.
+    """
+    host = Path.home() / _CODEX_AUTH_REL
+    agent_root = paths.state_dir() / "agent-home"
+    candidates: list[Path] = []
+    if host.exists():
+        candidates.append(host)
+    if agent_root.is_dir():
+        for agent_dir in agent_root.iterdir():
+            if not agent_dir.is_dir() or agent_dir.name.startswith("_"):
+                continue
+            af = agent_dir / _CODEX_AUTH_REL
+            if af.exists():
+                candidates.append(af)
+    if len(candidates) < 2:
+        return
+
+    newest: Path | None = None
+    newest_ts = ""
+    for c in candidates:
+        try:
+            d = json.loads(c.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        ts = d.get("last_refresh") or ""
+        # Reject future timestamps (clock skew, or a stray test fixture).
+        # 2026-07-13 incident: a mock auth.json with last_refresh=2027-01-01
+        # permanently won the newest-wins contest and re-stomped every real
+        # login within one sync cycle. ISO-8601 sorts lexicographically, so
+        # compare against "now + 1h" rendered in the same format.
+        import datetime as _dt
+        horizon = (_dt.datetime.now(_dt.timezone.utc)
+                   + _dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        if isinstance(ts, str) and ts > newest_ts and ts[:19] <= horizon:
+            newest_ts = ts
+            newest = c
+    if not newest or not newest_ts:
+        return
+
+    try:
+        src_bytes = newest.read_bytes()
+    except OSError:
+        return
+    synced = 0
+    for dst in candidates:
+        if dst == newest:
+            continue
+        try:
+            if dst.read_bytes() == src_bytes:
+                continue  # already matches, no-op
+        except OSError:
+            pass
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            # Atomic write: temp file + rename, so codex mid-read never
+            # sees a half-written auth.json.
+            tmp = dst.with_suffix(dst.suffix + ".tmp")
+            tmp.write_bytes(src_bytes)
+            tmp.chmod(0o600)
+            tmp.replace(dst)
+            synced += 1
+        except OSError as e:
+            print(f"  ⚠️ codex-sync: {dst.parent.parent.name} failed: {e}")
+    if synced:
+        src_name = newest.parent.parent.name if newest != host else "host"
+        print(f"  ✅ codex auth synced from {src_name} (last_refresh {newest_ts[:19]}) → {synced} peer(s)")

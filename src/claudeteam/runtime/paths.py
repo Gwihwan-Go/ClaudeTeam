@@ -66,10 +66,23 @@ def router_seen_file() -> Path:
 
 def config_file() -> Path:
     """Path to the unified TOML config file (replaces team.json +
-    runtime_config.json). Override via CLAUDETEAM_CONFIG_FILE env, else
-    looks for `./claudeteam.toml` relative to cwd."""
+    runtime_config.json). Resolution order: CLAUDETEAM_CONFIG_FILE env →
+    `./claudeteam.toml` relative to cwd (if it exists) → `<state_dir>/..`/
+    claudeteam.toml. The last fallback is cwd-INDEPENDENT: CLAUDETEAM_STATE_DIR
+    is always propagated into every spawned pane / router / send subprocess, and
+    the unified TOML lives one level above the state dir. Without it, any
+    claudeteam subprocess invoked from a non-project cwd (router inject path, a
+    worker's `claudeteam send`) silently fell back to the legacy team.json,
+    which doesn't exist → empty team → 'agent <x> not in team.json' and a failed
+    best-effort pane wake."""
     from claudeteam.util import env_path
-    return env_path("CLAUDETEAM_CONFIG_FILE") or Path.cwd() / "claudeteam.toml"
+    explicit = env_path("CLAUDETEAM_CONFIG_FILE")
+    if explicit:
+        return explicit
+    cwd_cfg = Path.cwd() / "claudeteam.toml"
+    if cwd_cfg.exists():
+        return cwd_cfg
+    return state_dir().parent / "claudeteam.toml"
 
 
 def watchdog_pid_file() -> Path:

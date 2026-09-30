@@ -290,13 +290,26 @@ def supervise(specs: list[ProcessSpec],
 def _claudeteam_spec(name: str, pid_file: Path, *,
                      orphan_markers: tuple[str, ...] = (),
                      log_file: Path | None = None) -> ProcessSpec:
-    """Build a ProcessSpec for a `claudeteam <name>` daemon. The cmdline-match
-    string is just `\"claudeteam\"` so any process whose argv contains the
-    word counts — defends against PID reuse, doesn't lock to argv shape."""
+    """Build a ProcessSpec for a `claudeteam <name>` daemon.
+
+    The cmdline-match string is the full `claudeteam <name>`, NOT the bare
+    word. A bare "claudeteam" match is far too loose here: every agent pane
+    carries the identity prompt, which documents the CLI (`claudeteam inbox`,
+    `claudeteam status`, `claudeteam say`, …), and since 2026-09-17 codex
+    panes receive that prompt as an argv element — so ~6 occurrences of
+    "claudeteam" sit in each codex pane's cmdline. Combine that with a stale
+    pid_file and PID reuse across a reboot and is_alive() returns True for a
+    codex pane: `claudeteam up` prints "watchdog already alive, skipping" and
+    never starts the supervisor, and the watchdog likewise stops respawning a
+    dead router. Exactly that killed symcli's routing on 2026-09-20 (stale
+    watchdog.pid 29869 from the previous boot landed on a codex pane).
+    The identity prompt never contains "claudeteam router"/"claudeteam
+    watchdog", so the two-token form is unambiguous.
+    """
     return ProcessSpec(
         name=name,
         pid_file=pid_file,
-        expected_cmdline="claudeteam",
+        expected_cmdline=f"claudeteam {name}",
         spawn_cmd=["claudeteam", name],
         orphan_markers=orphan_markers,
         log_file=log_file,

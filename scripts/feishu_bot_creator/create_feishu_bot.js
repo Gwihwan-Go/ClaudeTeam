@@ -127,10 +127,55 @@ async function ensureLoggedIn(page, context) {
   // padding "to be safe" but it added 7 s to drive cold-start once
   // gotoWithRetry already waited for domcontentloaded.
   await page.waitForTimeout(500);
-  if (page.url().includes('accounts.feishu.cn')) {
+  // SPA hydration: Feishu serves the login UI inline at open.feishu.cn/app
+  // (no redirect to accounts.feishu.cn), so URL-based detection lies.
+  // Wait for hydration, then check page content for "Log In" / QR markers.
+  await page.waitForTimeout(8000);
+  const bodyText = await page.evaluate(() => document.body?.innerText || '');
+  const needsLogin = /Log In|登录|扫码登录|Sign up now/i.test(bodyText) &&
+                     /QR Code|二维码|扫码/i.test(bodyText);
+  if (needsLogin) {
     log('Not logged in. Please scan QR code...');
-    await page.waitForURL('**/open.feishu.cn/app**', { timeout: 120000 });
-    log('Login successful!');
+    if (process.env.CREATOR_HEADLESS === '1') {
+      const QR_PATH = '/tmp/skilltest-qr.png';
+      log(`Headless — saving QR screenshot to ${QR_PATH} every 5s. View it on your laptop.`);
+      const snap = async () => {
+        try {
+          // Feishu QR expires every ~60s; page shows a "Refresh QR Code"
+          // button with the QR canvas blurred out. Click it before snapping
+          // so the operator always sees a live QR.
+          await page.evaluate(() => {
+            const all = Array.from(document.querySelectorAll('*'));
+            const refresh = all.find(el => {
+              const t = (el.innerText || '').trim();
+              return /Refresh QR Code|刷新二维码/i.test(t)
+                  && el.children.length === 0;
+            });
+            if (refresh) refresh.click();
+          });
+          await page.screenshot({ path: QR_PATH, fullPage: false });
+        }
+        catch (e) { log(`screenshot failed: ${e.message}`); }
+      };
+      await snap();
+      const interval = setInterval(snap, 5000);
+      try {
+        // Login success = QR markers disappear (page transitions to authed UI).
+        await page.waitForFunction(() => {
+          const t = document.body?.innerText || '';
+          return !/Log In With QR Code|扫码登录|Sign up now/i.test(t);
+        }, null, { timeout: 300000, polling: 2000 });
+      } finally {
+        clearInterval(interval);
+      }
+    } else {
+      await page.waitForFunction(() => {
+        const t = document.body?.innerText || '';
+        return !/Log In With QR Code|扫码登录|Sign up now/i.test(t);
+      }, { timeout: 180000, polling: 2000 });
+    }
+    log('Login detected!');
+    await page.waitForTimeout(3000);  // let post-login redirect settle
     await saveCookies(context);
   } else {
     log('Already logged in');
@@ -386,7 +431,11 @@ async function stage_import_scopes(page, _ctx, state) {
   // visibility check refuse without `force`, but the click itself works.
   await dialog.locator('.monaco-editor .view-lines').first().click({ force: true });
   await page.waitForTimeout(300);
-  await page.keyboard.press('Meta+a');
+  // Use Linux-friendly modifier when running on non-darwin. Chromium on
+  // Linux binds paste to Ctrl+V; Meta is Super and doesn't trigger paste
+  // in Monaco. macOS binds to Cmd (Meta). Detect once at module load.
+  const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
+  await page.keyboard.press(`${MOD}+a`);
   await page.waitForTimeout(200);
   await page.keyboard.press('Backspace');
   await page.waitForTimeout(300);
@@ -394,7 +443,7 @@ async function stage_import_scopes(page, _ctx, state) {
     await navigator.clipboard.writeText(text);
   }, SCOPES_JSON);
   await page.waitForTimeout(200);
-  await page.keyboard.press('Meta+v');
+  await page.keyboard.press(`${MOD}+v`);
   await page.waitForTimeout(1000);
   // Quick correctness check: textarea.value should now hold a chunk of
   // our payload. Empty/short = paste mechanism broke (Feishu UI changed
@@ -919,9 +968,53 @@ async function withBrowser(fn) {
     console.error('Error: playwright not installed. Run: npm install && npx playwright install chromium');
     process.exit(1);
   }
-  const browser = await chromium.launch({ headless: false });
-  const context = await browser.newContext();
+  const browser = await chromium.launch({
+    headless: process.env.CREATOR_HEADLESS === '1',
+    args: process.env.CREATOR_HEADLESS === '1'
+      ? ['--no-sandbox', '--disable-dev-shm-usage']
+      : [],
+    proxy: process.env.CREATOR_PROXY
+      ? { server: process.env.CREATOR_PROXY }
+      : undefined,
+  });
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  // Lark's "Upgraded scopes: categorization by access token" multi-step
+  // guided tour mounts an overlay (.lark-guide-v2-container) that
+  // intercepts pointer events and blocks the Playwright clicks
+  // mid-stage. Install a MutationObserver that auto-deletes any guide
+  // DOM the page tries to mount (covers initial mount + lazy rerenders
+  // + the in-page Monaco editor tour). addInitScript runs on every
+  // navigation so it survives stage hops.
+  await context.addInitScript(() => {
+    const sel = [
+      '.lark-guide-v2-container',
+      '.guide__guide-dom__container',
+      '.guide__guide-dom__guide-mask',
+      '[class*="lark-guide"]',
+      '[class*="guide__guide-dom"]',
+      '[class*="unique-guide-mask"]',
+    ].join(', ');
+    const kill = () => {
+      try { document.querySelectorAll(sel).forEach(el => el.remove()); }
+      catch (e) { /* observer race; next tick will retry */ }
+    };
+    if (!window.__larkGuideKiller) {
+      kill();
+      window.__larkGuideKiller = new MutationObserver(kill);
+      // documentElement may not exist yet at init-script time; defer.
+      const arm = () => {
+        if (document.documentElement) {
+          window.__larkGuideKiller.observe(document.documentElement, {
+            childList: true, subtree: true,
+          });
+        } else {
+          setTimeout(arm, 50);
+        }
+      };
+      arm();
+    }
+  });
   try {
     await loadCookies(context);
     const page = await context.newPage();

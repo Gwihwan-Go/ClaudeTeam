@@ -513,4 +513,4 @@ def test_all_known_specs_includes_both_router_and_watchdog():
         # Both expect the "claudeteam" cmdline marker (defends against
         # PID reuse — see ProcessSpec.expected_cmdline)
         for s in specs:
-            assert s.expected_cmdline == "claudeteam"
+            assert s.expected_cmdline == f"claudeteam {s.name}"
