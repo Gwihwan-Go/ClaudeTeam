@@ -113,6 +113,18 @@ bash examples/team_ops/check.sh symcli
 `check.sh` 只扫描 pane 尾部常见错误并提示仅剩 shell 的窗口；它不能证明
 agent 正在工作，也不能替代在飞书发消息验证完整消息链路。
 
+### watchdog 在运行，但 manager 收不到飞书消息
+
+先查看 `state/router.log` 和 `state/watchdog.log`。watchdog 进程存活只说明
+守护循环在运行；若持续出现 `router respawned`，同时 router 每次补读消息
+都报相同异常，说明重启没有解决消息处理错误。
+
+2026-10-08 修复了一个实际故障：纯文本 `1` 被解析成 JSON 整数，随后调用
+`.get()` 导致 router 崩溃；重启补读同一消息时再次崩溃。现在数字、布尔值、
+`null` 和数组等非对象 JSON 文本均保留原文投递，实时订阅和历史补读共用
+此修复。不要删除 cursor 或 inbox 来跳过消息；部署修复后由 watchdog 重启，
+确认 router 持续存活、cursor 前进，并检查 manager inbox 的投递及读取状态。
+
 ## 认证与网络改动
 
 **Claude（当前 Linux 部署）**：通过 `CLAUDE_CODE_OAUTH_TOKEN` 传入部署

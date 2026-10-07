@@ -296,6 +296,45 @@ def test_normalises_real_lark_cli_compact_wire_format():
     assert applied[0].msg_id == "om_x100b50536a8a94a0c457f151f14c25b"
 
 
+def test_json_literals_as_plain_text_do_not_block_live_or_catchup_delivery():
+    """Raw text '1' crashed the router and every subsequent catchup retry.
+
+    Preserve all non-object JSON literals as text, including falsey values
+    which used to be silently dropped, and deliver the following message.
+    """
+    texts = ["1", "0", "-2", "1.5", "true", "false", "null",
+             "[]", "[1, 2]", '"hello"', "following message"]
+    for wrapped in (False, True):
+        events = []
+        for i, text in enumerate(texts):
+            if wrapped:
+                event = _wrapped(f"om_{i}", "oc_team", "ou_user", text)
+                event["event"]["message"]["content"] = text
+            else:
+                event = {
+                    "message_id": f"om_{i}",
+                    "chat_id": "oc_team",
+                    "sender_id": "ou_user",
+                    "message_type": "text",
+                    "content": text,
+                }
+            events.append(event)
+        applied = []
+        progressed = []
+        stats = process_lines(
+            _ndjson(*events),
+            team_agents=_AGENTS,
+            chat_id="oc_team",
+            apply_fn=applied.append,
+            on_progress=lambda decision, stats: progressed.append(decision.msg_id),
+        )
+        assert stats.handled == len(texts)
+        assert stats.dropped == 0
+        assert [decision.text for decision in applied] == texts
+        assert all(decision.targets == ["manager"] for decision in applied)
+        assert progressed == [f"om_{i}" for i in range(len(texts))]
+
+
 def test_normalises_real_lark_cli_compact_with_json_encoded_content():
     """Same wire format but content is JSON-encoded {"text": "..."} —
     the older Feishu-webhook style some lark-cli versions still emit."""

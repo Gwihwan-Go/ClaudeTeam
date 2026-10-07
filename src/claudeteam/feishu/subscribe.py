@@ -90,7 +90,8 @@ def _extract_text(content, msg_type: str) -> str:
     """Reduce a Feishu message content payload to a plain-text representation
     classify_event can route on.
 
-    - text: returns the literal "text" field (or the raw string if not JSON).
+    - text: returns the literal "text" field (or the raw string if it is
+      not a JSON object).
     - image: returns "[image: image_key=<key>]" so the message routes
       instead of getting dropped as "empty".
     - file: returns "[file: <file_name>]" or "[file: file_key=<key>]".
@@ -104,9 +105,13 @@ def _extract_text(content, msg_type: str) -> str:
     if not isinstance(content, str):
         return ""
     try:
-        data = json.loads(content) or {}
+        data = json.loads(content)
     except json.JSONDecodeError:
         # Plain string content (legacy variant)
+        return content
+    if not isinstance(data, dict):
+        # Compact events and catchup can contain plain text such as "1"
+        # or "false". Valid JSON alone does not make it a message object.
         return content
     if msg_type == "image":
         key = data.get("image_key", "")
