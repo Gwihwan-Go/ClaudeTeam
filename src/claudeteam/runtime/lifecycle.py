@@ -26,7 +26,9 @@ the Feishu env into their `claudeteam say` shell-outs.
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import tempfile
 from pathlib import Path
 
 from claudeteam.agents import get_adapter, identity
@@ -362,6 +364,64 @@ def _ensure_agent_home(agent: str, cli: str) -> None:
     _seed_cli_credentials(agent, cli)
 
 
+def _seed_lark_profile(agent: str) -> None:
+    """Give an isolated agent HOME the team's bot profile for Docs/Drive.
+
+    `claudeteam say` can use propagated app env vars, but a direct
+    `lark-cli --profile ... docs/drive` command needs a config.json under
+    the agent's own HOME. Seed only this team's bot identity, never the
+    operator's user OAuth tokens or other app profiles.
+    """
+    profile = config.lark_profile()
+    app_id = env_str("FEISHU_APP_ID") or env_str("LARKSUITE_CLI_APP_ID")
+    app_secret = (env_str("FEISHU_APP_SECRET")
+                  or env_str("LARKSUITE_CLI_APP_SECRET"))
+    if not (profile and app_id and app_secret):
+        return
+    from claudeteam.agents.claude_code import agent_home
+    dest = Path(agent_home(agent)) / ".lark-cli" / "config.json"
+    temp_path = None
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if dest.exists():
+            data = json.loads(dest.read_text(encoding="utf-8"))
+            apps = data.get("apps")
+            if not isinstance(apps, list):
+                return  # leave an agent-managed config untouched
+            for app in apps:
+                if isinstance(app, dict) and app.get("name") == profile:
+                    if (app.get("appId") == app_id
+                            and app.get("appSecret") == app_secret):
+                        return
+                    apps.remove(app)
+                    break
+        else:
+            data = {"apps": []}
+            apps = data["apps"]
+        apps.append({"name": profile, "appId": app_id,
+                     "appSecret": app_secret, "brand": "feishu",
+                     "lang": "zh_cn", "users": []})
+        # Keep the secret private even on hosts with a permissive umask.
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=dest.parent, prefix=".config-",
+                                         delete=False) as tmp:
+            json.dump(data, tmp, ensure_ascii=False)
+            temp_path = tmp.name
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, dest)
+        os.chmod(dest, 0o600)
+    except (OSError, ValueError, TypeError):
+        # Profile seeding is best-effort; a read-only HOME must not stop
+        # the agent's primary CLI from launching.
+        return
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
 def pane_env_prefix() -> str:
     """Build a shell env prefix that, prepended to a spawn_cmd, makes the
     spawned process inherit CLAUDETEAM_STATE_DIR and the Feishu env so
@@ -433,10 +493,11 @@ def provision_pane(agent: str, target: tmux.Target) -> str:
     # defaulting to `agent` matches render's own fallback so the
     # rendered file is byte-identical.
     identity.write(agent, role=cfg.get("role") or agent, cli=cli, model=model)
+    _ensure_agent_home(agent, cli)
+    _seed_lark_profile(agent)
     if cfg.get("lazy"):
         local_facts.upsert_status(agent, "待命", "lazy: CLI starts on first message")
         return LAZY
-    _ensure_agent_home(agent, cli)
     if cli == "codex-cli":
         from claudeteam.agents.codex_cli import codex_home
         ensure_workdir_trusted(

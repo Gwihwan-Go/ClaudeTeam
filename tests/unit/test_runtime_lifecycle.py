@@ -9,6 +9,7 @@ READY_NO_INIT / SPAWN_FAILED).
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from helpers import attr_patch, env_patch, isolated_env, tmux_patch
@@ -578,3 +579,33 @@ def test_ensure_agent_home_seeds_codex_oauth():
             lifecycle._ensure_agent_home("worker_codex", "codex-cli")
         dst = Path(claude_code.agent_home("worker_codex")) / ".codex" / "auth.json"
         assert dst.read_text() == "AUTH"
+
+
+def test_agent_lark_profile_uses_only_the_team_bot_and_private_permissions():
+    from claudeteam.agents import claude_code
+    team = {"agents": {"worker_codex": {"cli": "codex-cli"}}}
+    with isolated_env(team=team), attr_patch(claude_code, _DATA_WRITABLE=False), \
+            env_patch(LARK_CLI_PROFILE="shared-bot", FEISHU_APP_ID="cli_shared",
+                      FEISHU_APP_SECRET="test-secret"):
+        lifecycle._ensure_agent_home("worker_codex", "codex-cli")
+        lifecycle._seed_lark_profile("worker_codex")
+        dst = Path(claude_code.agent_home("worker_codex")) / ".lark-cli/config.json"
+        data = json.loads(dst.read_text())
+        assert data == {"apps": [{"name": "shared-bot", "appId": "cli_shared",
+                                 "appSecret": "test-secret", "brand": "feishu",
+                                 "lang": "zh_cn", "users": []}]}
+        assert dst.stat().st_mode & 0o077 == 0
+
+
+def test_agent_lark_profile_preserves_an_existing_other_profile():
+    from claudeteam.agents import claude_code
+    with isolated_env(), attr_patch(claude_code, _DATA_WRITABLE=False), \
+            env_patch(LARK_CLI_PROFILE="shared-bot", FEISHU_APP_ID="cli_shared",
+                      FEISHU_APP_SECRET="test-secret"):
+        dst = Path(claude_code.agent_home("manager")) / ".lark-cli/config.json"
+        dst.parent.mkdir(parents=True)
+        dst.write_text(json.dumps({"apps": [{"name": "existing", "users": [{"id": "owned"}]}]}))
+        lifecycle._seed_lark_profile("manager")
+        apps = json.loads(dst.read_text())["apps"]
+        assert [a["name"] for a in apps] == ["existing", "shared-bot"]
+        assert apps[0]["users"] == [{"id": "owned"}]
