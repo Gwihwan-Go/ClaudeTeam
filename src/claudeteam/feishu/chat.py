@@ -86,3 +86,25 @@ def list_recent(chat_id: str, *, page_size: int = 20, profile: str = "",
     if not data:
         return []
     return list(data.get("messages") or [])
+
+
+def list_recent_page(chat_id: str, *, page_size: int = 50,
+                     page_token: str = "", profile: str = "",
+                     as_user: bool = True,
+                     lark_run: Callable = _real_run) -> dict:
+    """Fetch one history page, preserving pagination and surfacing failures.
+
+    Polling must distinguish an empty chat from a failed API call; treating
+    both as [] would make a silent outage look healthy.
+    """
+    args = ["im", "+chat-messages-list", "--chat-id", chat_id,
+            "--page-size", str(page_size), *_as(as_user),
+            "--format", "json", "--no-reactions"]
+    if page_token:
+        args.extend(["--page-token", page_token])
+    data = lark_run(args, profile=profile)
+    if not isinstance(data, dict):
+        raise OSError("Feishu history request failed")
+    if not isinstance(data.get("messages"), list) or not isinstance(data.get("has_more"), bool):
+        raise ValueError("Feishu history response missing pagination fields")
+    return data

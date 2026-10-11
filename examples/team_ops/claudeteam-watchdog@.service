@@ -1,0 +1,17 @@
+[Unit]
+Description=ClaudeTeam watchdog for %i
+After=network-online.target mihomo.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/.claudeteam-teams/run-watchdog.sh %i
+Restart=always
+RestartSec=5
+KillMode=process
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

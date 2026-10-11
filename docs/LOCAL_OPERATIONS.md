@@ -125,6 +125,27 @@ agent 正在工作，也不能替代在飞书发消息验证完整消息链路�
 此修复。不要删除 cursor 或 inbox 来跳过消息；部署修复后由 watchdog 重启，
 确认 router 持续存活、cursor 前进，并检查 manager inbox 的投递及读取状态。
 
+若本机的 Feishu WebSocket 长期收不到实时事件，可在团队 TOML 的
+`[router]` 中设置 `poll_interval_s = 20`。router 将按间隔读取飞书历史，
+自动翻页并按消息 ID 去重；单次请求失败会在下轮重试，写 manager inbox
+失败时也不会把消息标记为已处理。轮询依赖飞书历史读取权限，且消息
+延迟通常不超过一个轮询周期加 API 调用时间。切换模式后只重启 router，
+不要重建 agent 会话。
+
+watchdog 本身也需要宿主机托管。Linux 用户 systemd 可用时，复制
+`examples/team_ops/run-watchdog.sh` 到 `~/.claudeteam-teams/`，复制
+`examples/team_ops/claudeteam-watchdog@.service` 到
+`~/.config/systemd/user/`，然后运行：
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now claudeteam-watchdog@symcli.service
+systemctl --user status claudeteam-watchdog@symcli.service
+```
+
+登录用户还需启用 linger，才能在注销后继续运行服务。systemd 会在
+watchdog 异常退出或主机重启后启动它；watchdog 再恢复 router。
+
 ## 认证与网络改动
 
 **Claude（当前 Linux 部署）**：通过 `CLAUDE_CODE_OAUTH_TOKEN` 传入部署
@@ -161,5 +182,7 @@ agent 的 `.codex/auth.json`。watchdog 按 `last_refresh` 同步宿主机和
 原安装目录、实际团队环境、凭据、聊天日志和运行状态不属于仓库内容。
 
 验证：在独立 HOME、state 和 tmux 目录下运行 `python3 tests/run.py`，
-1031 项通过、0 项失败；恢复 shell 脚本通过 `bash -n`，应用创建器通过
-`node --check`。未启动真实团队或执行飞书应用创建。
+1041 项通过、0 项失败；恢复 shell 脚本通过 `bash -n`，应用创建器通过
+`node --check`。2026-10-11 在 Linux 宿主机为 symcli 启用了历史轮询与
+systemd watchdog，确认轮询成功、watchdog 被 SIGKILL 后自动重启，
+router 与 agent pane 保持运行；未执行飞书应用创建。

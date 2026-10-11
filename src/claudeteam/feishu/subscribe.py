@@ -217,7 +217,8 @@ def process_lines(lines: Iterable[str], *,
                   apply_fn: Callable = apply,
                   on_progress: Callable | None = None,
                   on_line_received: Callable | None = None,
-                  seen_msg_ids: set[str] | None = None) -> LoopStats:
+                  seen_msg_ids: set[str] | None = None,
+                  stop_on_apply_error: bool = False) -> LoopStats:
     """Run the subscribe loop over `lines` (one Feishu event JSON each).
 
     Designed to be exited by exhausting the iterator.  The production
@@ -254,15 +255,23 @@ def process_lines(lines: Iterable[str], *,
         except json.JSONDecodeError:
             _record_drop(stats, "bad_json")
             continue
-        event = _normalise(payload)
-        decision = classify_event(
-            event,
-            team_agents=team_agents,
-            chat_id=chat_id,
-            bot_id=bot_id,
-            seen_msg_ids=stats.seen_msg_ids,
-            default_target=default_target,
-        )
+        try:
+            event = _normalise(payload)
+            decision = classify_event(
+                event,
+                team_agents=team_agents,
+                chat_id=chat_id,
+                bot_id=bot_id,
+                seen_msg_ids=stats.seen_msg_ids,
+                default_target=default_target,
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
+            # One malformed Feishu payload must not trap the router on
+            # every subsequent history poll and block later messages.
+            msg_id = payload.get("message_id", "") if isinstance(payload, dict) else ""
+            print(f"  ⚠️ malformed event {msg_id}: {e}")
+            _record_drop(stats, "bad_event")
+            continue
         if decision.is_drop():
             _record_drop(stats, decision.reason or "drop")
             continue
@@ -279,6 +288,10 @@ def process_lines(lines: Iterable[str], *,
             # (catchup or stream re-receive) can re-attempt later.
             print(f"  ⚠️ apply_fn raised on {decision.msg_id}: {e}")
             _record_drop(stats, "apply_error")
+            if stop_on_apply_error:
+                # Polling must not advance the cursor past a message whose
+                # durable inbox write failed. Retry this page next cycle.
+                raise
             continue
         # Mark seen ONLY after successful apply. Round-63: previous order
         # added to seen BEFORE apply, which meant a transient apply

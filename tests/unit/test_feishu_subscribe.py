@@ -335,6 +335,44 @@ def test_json_literals_as_plain_text_do_not_block_live_or_catchup_delivery():
         assert progressed == [f"om_{i}" for i in range(len(texts))]
 
 
+def test_malformed_event_does_not_block_following_message():
+    applied = []
+    stats = process_lines(
+        _ndjson({"event": {"message": 7}},
+                _wrapped("om_good", "oc_team", "ou_user", "after bad event")),
+        team_agents=_AGENTS, chat_id="oc_team", apply_fn=applied.append,
+    )
+    assert stats.drops_by_reason["bad_event"] == 1
+    assert stats.handled == 1
+    assert [decision.text for decision in applied] == ["after bad event"]
+
+
+def test_poll_stops_before_advancing_past_failed_inbox_write():
+    applied = []
+    progressed = []
+    def apply(decision):
+        if decision.msg_id == "om_fail":
+            raise OSError("disk full")
+        applied.append(decision.msg_id)
+    lines = _ndjson(
+        _wrapped("om_first", "oc_team", "ou_user", "first"),
+        _wrapped("om_fail", "oc_team", "ou_user", "retry me"),
+        _wrapped("om_later", "oc_team", "ou_user", "later"),
+    )
+    seen = set()
+    try:
+        process_lines(lines, team_agents=_AGENTS, chat_id="oc_team",
+                      apply_fn=apply, seen_msg_ids=seen,
+                      on_progress=lambda decision, stats: progressed.append(decision.msg_id),
+                      stop_on_apply_error=True)
+    except OSError:
+        pass
+    else:
+        assert False, "a failed durable delivery must stop this history page"
+    assert applied == progressed == ["om_first"]
+    assert seen == {"om_first"}
+
+
 def test_normalises_real_lark_cli_compact_with_json_encoded_content():
     """Same wire format but content is JSON-encoded {"text": "..."} —
     the older Feishu-webhook style some lark-cli versions still emit."""

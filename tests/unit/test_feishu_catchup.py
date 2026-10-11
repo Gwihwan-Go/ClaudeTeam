@@ -360,6 +360,48 @@ def test_pending_lines_returns_empty_when_history_empty():
     assert lines == []
 
 
+def test_paginated_poll_recovers_messages_beyond_first_history_page():
+    from claudeteam.feishu import chat
+    from helpers import attr_patch, env_patch
+    calls = []
+    pages = {
+        "": {"messages": [_msg("om_new", "900000", text="new")],
+             "has_more": True, "page_token": "next"},
+        "next": {"messages": [_msg("om_old", "800000", text="old")],
+                 "has_more": False, "page_token": ""},
+    }
+    def fetch(chat_id, **kwargs):
+        calls.append(kwargs["page_token"])
+        return pages[kwargs["page_token"]]
+    with isolated_env(), env_patch(CLAUDETEAM_LARK_SEND_AS="bot"), \
+            attr_patch(chat, list_recent_page=fetch):
+        catchup.write_cursor("seed", "700000")
+        lines = catchup.pending_lines("oc_x", paginate=True)
+    ids = [json.loads(line)["event"]["message"]["message_id"] for line in lines]
+    assert calls == ["", "next"]
+    assert ids == ["om_old", "om_new"]
+
+
+def test_paginated_poll_surfaces_failed_history_page():
+    from claudeteam.feishu import chat
+    from helpers import attr_patch, env_patch
+    def fetch(chat_id, **kwargs):
+        if kwargs["page_token"]:
+            raise OSError("history unavailable")
+        return {"messages": [_msg("om_new", "900000")],
+                "has_more": True, "page_token": "next"}
+    with isolated_env(), env_patch(CLAUDETEAM_LARK_SEND_AS="bot"), \
+            attr_patch(chat, list_recent_page=fetch):
+        catchup.write_cursor("seed", "700000")
+        try:
+            catchup.pending_lines("oc_x", paginate=True)
+        except OSError:
+            pass
+        else:
+            assert False, "partial history must not be treated as complete"
+        assert catchup.read_cursor()["message_id"] == "seed"
+
+
 def test_pending_lines_skips_messages_with_bad_create_time():
     history = [
         _msg("om_ok", "1000"),

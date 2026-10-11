@@ -202,7 +202,8 @@ def _newer_than(messages: Iterable[dict], cursor_create_time: str, *,
 def pending_lines(chat_id: str, *,
                   profile: str = "",
                   page_size: int = 50,
-                  list_fn: Callable | None = None) -> list[str]:
+                  list_fn: Callable | None = None,
+                  paginate: bool = False) -> list[str]:
     """Return NDJSON lines for messages newer than the saved cursor.
 
     Oldest-first so process_lines applies them in chronological order.
@@ -238,6 +239,33 @@ def pending_lines(chat_id: str, *,
             from claudeteam.runtime import tunables
             as_value = str(tunables.tunable("feishu.send_as", "user")).lower()
         as_user = as_value != "bot"
+        if paginate:
+            cutoff = ((cursor_ms or _to_epoch_ms(cursor_ct)) // 60_000) * 60_000
+            cutoff -= max(0, _catchup_lookback_ms())
+            msgs: list[dict] = []
+            token = ""
+            visited: set[str] = set()
+            for _ in range(200):
+                page = _chat.list_recent_page(
+                    chat_id, profile=profile, page_size=page_size,
+                    page_token=token, as_user=as_user)
+                batch = list(page.get("messages") or [])
+                msgs.extend(batch)
+                # History pages are newest-first. Once a full page crosses
+                # the cutoff, no older page can hold a pending message.
+                valid_times = [_to_epoch_ms(m.get("create_time")) for m in batch]
+                if not page.get("has_more") or any(0 < ts < cutoff for ts in valid_times):
+                    break
+                next_token = str(page.get("page_token") or "")
+                if not next_token or next_token in visited:
+                    raise RuntimeError("Feishu history pagination stalled")
+                visited.add(next_token)
+                token = next_token
+            else:
+                raise RuntimeError("Feishu history exceeded 200 pages")
+            fresh = _newer_than(msgs, cursor_ct, cursor_ms=cursor_ms,
+                                lookback_ms=_catchup_lookback_ms())
+            return [_msg_to_event_line(m) for m in fresh]
         def list_fn():
             return _chat.list_recent(chat_id, profile=profile,
                                      page_size=page_size, as_user=as_user)

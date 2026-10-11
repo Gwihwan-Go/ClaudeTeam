@@ -124,12 +124,85 @@ def _make_apply_with_wake(*, session: str, chat_id: str, profile: str,
         return adapter_for_agent(agent)
 
     def _apply_with_wake(decision):
-        return _deliver_apply(decision, wake_fn=wake.wake_if_dormant,
-                              session=session, chat_id=chat_id,
-                              profile=profile, team_agents=team_agents,
-                              lazy_agents=lazy_agents,
-                              adapter_for_agent=lookup_adapter)
+        report = _deliver_apply(decision, wake_fn=wake.wake_if_dormant,
+                                session=session, chat_id=chat_id,
+                                profile=profile, team_agents=team_agents,
+                                lazy_agents=lazy_agents,
+                                adapter_for_agent=lookup_adapter)
+        # deliver.apply logs inbox write failures but normally returns a
+        # report. Do not advance the cursor or mark a manager message seen
+        # when the disk was full and its durable inbox row never landed.
+        if "manager" in decision.targets and "manager" not in report.written:
+            raise OSError("manager inbox write failed; retry on next poll")
+        return report
     return _apply_with_wake
+
+
+def _poll_interval_s() -> float:
+    """A positive value uses REST history instead of the WebSocket stream."""
+    try:
+        return max(0.0, float(tunables.tunable("router.poll_interval_s", 0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _run_polling(chat: str, agents: list[str], interval_s: float) -> int:
+    """Process paginated history serially; no subscription restart required.
+
+    This is for hosts where event +subscribe never delivers live messages.
+    Repeated REST failures leave the cursor and dedup set untouched; the next
+    poll retries the same history after connectivity or disk space recovers.
+    """
+    if not catchup.read_cursor().get("create_time"):
+        # REST polling needs an initial reference point. Seed at startup so
+        # the first poll covers recent messages without replaying an entire
+        # older chat on a fresh deployment.
+        catchup.write_cursor("__poll_start__", str(int(time.time() * 1000)))
+    pid_file = paths.router_pid_file()
+    if not pidlock.acquire(pid_file, name="router"):
+        return 1
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    profile = config.lark_profile()
+    team_data = config.load_team()
+    agents_dict = team_data.get("agents", {})
+    apply_fn = _make_apply_with_wake(
+        session=team_data.get("session", "ClaudeTeam"),
+        chat_id=chat, profile=profile, team_agents=agents,
+        agent_adapters=_build_agent_adapters(agents_dict),
+        lazy_agents=frozenset(name for name, cfg in agents_dict.items()
+                              if cfg.get("lazy")),
+    )
+    seen = _load_seen_msg_ids()
+    loop_kwargs = dict(
+        team_agents=agents, chat_id=chat, default_target="manager",
+        apply_fn=apply_fn, on_progress=_make_on_progress([time.monotonic()]),
+        seen_msg_ids=seen, stop_on_apply_error=True,
+    )
+    print(f"🚀 router polling chat {chat} every {interval_s:g}s (profile={profile or '<default>'})")
+    polls = 0
+    try:
+        while True:
+            try:
+                pending = catchup.pending_lines(chat, profile=profile,
+                                                paginate=True)
+                if pending:
+                    stats = process_lines(iter(pending), **loop_kwargs)
+                    if stats.handled or stats.drops_by_reason.get("apply_error"):
+                        print(f"📥 poll: handled={stats.handled} dropped={stats.dropped}")
+                polls += 1
+                if polls == 1 or polls % 15 == 0:
+                    print(f"✅ router poll healthy ({polls} successful fetches)")
+                if polls % 100 == 0:
+                    seen.clear()
+                    seen.update(_load_seen_msg_ids())
+            except Exception as e:
+                warn(f"⚠️  router poll failed; will retry: {e}")
+            time.sleep(interval_s)
+    except KeyboardInterrupt:
+        print("router stopped (Ctrl-C)")
+        return 0
+    finally:
+        pidlock.release(pid_file)
 
 
 def _terminate_subscribe_group(proc: subprocess.Popen) -> None:
@@ -307,6 +380,10 @@ def main(argv: list[str]) -> int:
     agents = config.agent_names()
     if not agents:
         return error_exit("❌ team.json has no agents")
+
+    poll_interval = _poll_interval_s()
+    if poll_interval > 0:
+        return _run_polling(chat, agents, poll_interval)
 
     pid_file = paths.router_pid_file()
     if not pidlock.acquire(pid_file, name="router"):

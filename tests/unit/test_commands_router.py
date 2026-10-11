@@ -16,6 +16,8 @@ from claudeteam.commands.router import (
     _build_subscribe_cmd,
     _load_seen_msg_ids,
     _make_on_progress,
+    _make_apply_with_wake,
+    _poll_interval_s,
     _stale_event_threshold_s,
     _watch_subscribe_health,
 )
@@ -196,6 +198,27 @@ def test_make_on_progress_refreshes_timestamp_on_each_event():
             catchup.record_decision = real_record
     # time.monotonic always > 0 since boot; before was 0.0
     assert after > before
+
+
+def test_poll_interval_uses_configured_rest_mode():
+    with isolated_env(), env_patch(CLAUDETEAM_ROUTER_POLL_INTERVAL_S="20"):
+        assert _poll_interval_s() == 20.0
+
+
+def test_manager_inbox_write_failure_is_retryable():
+    from types import SimpleNamespace
+    from claudeteam.commands import router
+    apply_fn = _make_apply_with_wake(
+        session="symcli", chat_id="oc_x", profile="test",
+        team_agents=["manager"], agent_adapters={}, lazy_agents=frozenset(),
+    )
+    with attr_patch(router, _deliver_apply=lambda *a, **kw: SimpleNamespace(written=[])):
+        try:
+            apply_fn(SimpleNamespace(targets=["manager"]))
+        except OSError as e:
+            assert "retry" in str(e)
+        else:
+            assert False, "failed inbox write must not advance the cursor"
 
 
 def test_watch_subscribe_health_self_terminates_on_stale_events():

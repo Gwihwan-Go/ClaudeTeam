@@ -126,6 +126,38 @@ def test_list_recent_handles_missing_messages_field():
     assert chat.list_recent("oc_x", lark_run=spy) == []
 
 
+def test_list_recent_page_threads_pagination_and_returns_metadata():
+    page = {"messages": [{"message_id": "om_1"}],
+            "has_more": True, "page_token": "next"}
+    spy = _Spy(page)
+    assert chat.list_recent_page("oc_x", page_token="previous",
+                                 as_user=False, lark_run=spy) == page
+    args = spy.calls[0]["args"]
+    assert args[args.index("--page-token") + 1] == "previous"
+    assert args[args.index("--as") + 1] == "bot"
+    assert "--no-reactions" in args
+
+
+def test_list_recent_page_raises_on_failed_history_request():
+    spy = _Spy(None)
+    try:
+        chat.list_recent_page("oc_x", lark_run=spy)
+    except OSError:
+        pass
+    else:
+        assert False, "failed fetch must not look like an empty chat"
+
+
+def test_list_recent_page_rejects_malformed_history_response():
+    spy = _Spy({"messages": []})
+    try:
+        chat.list_recent_page("oc_x", lark_run=spy)
+    except ValueError:
+        pass
+    else:
+        assert False, "missing pagination fields must not look complete"
+
+
 def test_send_card_returns_none_when_chat_id_empty():
     """Sister to send_text's same guard — silently skip on empty
     chat_id rather than letting lark-cli error."""
